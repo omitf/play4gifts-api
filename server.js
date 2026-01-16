@@ -45,6 +45,16 @@ function normalizeStatus(raw) {
   return String(raw ?? "").trim().toLowerCase();
 }
 
+app.get("/db-test", async (req, res) => {
+  try {
+    const r = await pool.query("SELECT 1 AS ok");
+    return res.json({ ok: true, db: r.rows[0] });
+  } catch (e) {
+    console.error("DB TEST ERROR:", e);
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 // Health check
 app.get("/", (req, res) => res.json({ ok: true }));
 
