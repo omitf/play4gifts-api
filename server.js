@@ -70,7 +70,8 @@ app.get("/debug/payments", (req, res) => {
 // ====== NOWPayments Webhook ======
 // Set NOWPayments IPN/Webhook URL to:
 // https://YOUR-RAILWAY-DOMAIN/webhook/nowpayments
-app.post("/webhook/nowpayments", (req, res) => {
+//app.post("/webhook/nowpayments", (req, res) => {
+app.post("/webhook/nowpayments", async (req, res) => {	
   const body = req.body || {};
 
   // Log the webhook so you can confirm it is hitting Railway
@@ -110,12 +111,19 @@ app.post("/webhook/nowpayments", (req, res) => {
     p.token = token;
     p.expiresAt = expiresAt;
 
-    tokens.set(token, {
-      expiresAt,
-      tiktokUsername: null,
-      payment_id,
-      createdAt: new Date().toISOString()
-    });
+   // tokens.set(token, {
+   //   expiresAt,
+   //   tiktokUsername: null,
+   //   payment_id,
+  //    createdAt: new Date().toISOString()
+   // });
+
+	await pool.query(
+	  `INSERT INTO tokens (token, payment_id, tiktok_username, expires_at, used, created_at)
+	   VALUES ($1, $2, NULL, $3, false, NOW())
+	   ON CONFLICT (token) DO NOTHING`,
+	  [token, payment_id, expiresAt]
+	);
 
     console.log("TOKEN ISSUED:", { payment_id, token, expiresAt });
   }
