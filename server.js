@@ -172,7 +172,7 @@ app.get("/token-by-payment/:paymentId", async (req, res) => {
 });
 
 // ====== Game activates token with TikTok username ======
-app.post("/activate", (req, res) => {
+app.post("/activate", async (req, res) => {
   const token = String(req.body?.token ?? "").trim().toUpperCase();
   const tiktokUsername = String(req.body?.tiktokUsername ?? "").trim();
 
@@ -180,23 +180,47 @@ app.post("/activate", (req, res) => {
     return res.status(400).json({ ok: false, error: "token and tiktokUsername are required" });
   }
 
-  const t = tokens.get(token);
-  if (!t) return res.status(404).json({ ok: false, error: "Invalid token" });
+  try {
+    const r = await pool.query(
+      `SELECT token, tiktok_username, expires_at, used
+       FROM tokens
+       WHERE token = $1
+       LIMIT 1`,
+      [token]
+    );
 
-  const now = new Date();
-  const exp = new Date(t.expiresAt);
-  if (now > exp) return res.json({ ok: false, error: "Expired", expiresAt: t.expiresAt });
+    if (r.rowCount === 0) return res.status(404).json({ ok: false, error: "Invalid token" });
 
-  // Bind token to username on first activation; thereafter must match
-  if (t.tiktokUsername && t.tiktokUsername.toLowerCase() !== tiktokUsername.toLowerCase()) {
-    return res.status(403).json({ ok: false, error: "Token already bound to another username" });
+    const row = r.rows[0];
+    const exp = new Date(row.expires_at);
+    if (Date.now() > exp.getTime()) {
+      return res.json({ ok: false, error: "Expired", expiresAt: exp.toISOString() });
+    }
+
+    if (row.used) {
+      return res.status(403).json({ ok: false, error: "Token already used" });
+    }
+
+    // If already bound, it must match
+    if (row.tiktok_username && row.tiktok_username.toLowerCase() !== tiktokUsername.toLowerCase()) {
+      return res.status(403).json({ ok: false, error: "Token already bound to another username" });
+    }
+
+    // Bind username (only sets it if null or same)
+    await pool.query(
+      `UPDATE tokens
+       SET tiktok_username = $2
+       WHERE token = $1`,
+      [token, tiktokUsername]
+    );
+
+    return res.json({ ok: true, expiresAt: exp.toISOString(), tiktokUsername });
+  } catch (e) {
+    console.error("activate error:", e);
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
-
-  t.tiktokUsername = tiktokUsername;
-  tokens.set(token, t);
-
-  return res.json({ ok: true, expiresAt: t.expiresAt });
 });
+
 
 // ====== Game checks token validity ======
 app.post("/check", (req, res) => {
