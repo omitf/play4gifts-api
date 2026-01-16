@@ -1,6 +1,16 @@
 // server.js
 import express from "express";
 import crypto from "crypto";
+import pg from "pg";
+
+const { Pool } = pg;
+
+// Postgres connection (Railway provides DATABASE_URL)
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  // Railway Postgres typically requires SSL
+  ssl: { rejectUnauthorized: false }
+});
 
 const app = express();
 
