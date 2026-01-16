@@ -133,26 +133,42 @@ app.post("/webhook/nowpayments", async (req, res) => {
 });
 
 // ====== Claim page uses this: get token by payment_id ======
-app.get("/token-by-payment/:paymentId", (req, res) => {
+
+
+app.get("/token-by-payment/:paymentId", async (req, res) => {
   const paymentId = String(req.params.paymentId ?? "").trim();
   if (!paymentId) return res.status(400).json({ ok: false, error: "Missing paymentId" });
 
-  const p = payments.get(paymentId);
-  if (!p) return res.status(404).json({ ok: false, error: "Payment not found" });
+  try {
+    // Find latest token for this payment_id
+    const r = await pool.query(
+      `SELECT token, expires_at, used
+       FROM tokens
+       WHERE payment_id = $1
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [paymentId]
+    );
 
-  const status = normalizeStatus(p.status);
-  const paid = status === "confirmed" || status === "finished";
+    if (r.rowCount === 0) {
+      return res.status(404).json({ ok: false, error: "Token not found for this payment yet" });
+    }
 
-  if (!paid) {
-    return res.json({ ok: false, status: p.status });
+    const row = r.rows[0];
+
+    // Railway UI created expires_at as "date" in your table, so handle both date/timestamp
+    const expiresAt = row.expires_at instanceof Date ? row.expires_at.toISOString() : String(row.expires_at);
+
+    return res.json({
+      ok: true,
+      token: row.token,
+      expiresAt,
+      used: !!row.used
+    });
+  } catch (e) {
+    console.error("token-by-payment error:", e);
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
-
-  // If for any reason token isn't there yet, say so (shouldn’t happen, but safer)
-  if (!p.token) {
-    return res.json({ ok: false, status: p.status, error: "Paid but token not generated yet" });
-  }
-
-  return res.json({ ok: true, token: p.token, expiresAt: p.expiresAt });
 });
 
 // ====== Game activates token with TikTok username ======
