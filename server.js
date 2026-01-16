@@ -223,19 +223,42 @@ app.post("/activate", async (req, res) => {
 
 
 // ====== Game checks token validity ======
-app.post("/check", (req, res) => {
+app.post("/check", async (req, res) => {
   const token = String(req.body?.token ?? "").trim().toUpperCase();
   if (!token) return res.status(400).json({ ok: false, error: "token is required" });
 
-  const t = tokens.get(token);
-  if (!t) return res.status(404).json({ ok: false, error: "Invalid token" });
+  try {
+    const r = await pool.query(
+      `SELECT token, tiktok_username, expires_at, used
+       FROM tokens
+       WHERE token = $1
+       LIMIT 1`,
+      [token]
+    );
 
-  const now = new Date();
-  const exp = new Date(t.expiresAt);
-  if (now > exp) return res.json({ ok: false, error: "Expired", expiresAt: t.expiresAt });
+    if (r.rowCount === 0) return res.status(404).json({ ok: false, error: "Invalid token" });
 
-  return res.json({ ok: true, expiresAt: t.expiresAt, tiktokUsername: t.tiktokUsername });
+    const row = r.rows[0];
+    const exp = new Date(row.expires_at);
+    if (Date.now() > exp.getTime()) {
+      return res.json({ ok: false, error: "Expired", expiresAt: exp.toISOString() });
+    }
+
+    if (row.used) {
+      return res.status(403).json({ ok: false, error: "Token already used" });
+    }
+
+    return res.json({
+      ok: true,
+      expiresAt: exp.toISOString(),
+      tiktokUsername: row.tiktok_username
+    });
+  } catch (e) {
+    console.error("check error:", e);
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
 });
+
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("API running on port", PORT));
