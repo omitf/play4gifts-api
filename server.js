@@ -1,9 +1,13 @@
+// server.js
 import express from "express";
 import crypto from "crypto";
 
 const app = express();
+
+// Parse JSON bodies (NOWPayments sends JSON)
 app.use(express.json({ limit: "1mb" }));
 
+// CORS so your Cloudflare claim.html can call this API
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
@@ -12,11 +16,10 @@ app.use((req, res, next) => {
   next();
 });
 
-
 // ====== SIMPLE IN-MEMORY STORAGE (MVP) ======
-// Later you can replace with a DB (Postgres).
-const payments = new Map(); // payment_id -> { status, email, token, expiresAt }
-const tokens = new Map();   // token -> { expiresAt, tiktokUsername, payment_id }
+// NOTE: Will reset on Railway restart/redeploy.
+const payments = new Map(); // payment_id -> { status, token, expiresAt, email, updatedAt }
+const tokens = new Map();   // token -> { expiresAt, tiktokUsername, payment_id, createdAt }
 
 function makeToken() {
   return crypto.randomBytes(16).toString("hex").toUpperCase(); // 32 chars
@@ -28,50 +31,97 @@ function addDays(date, days) {
   return d;
 }
 
+function normalizeStatus(raw) {
+  return String(raw ?? "").trim().toLowerCase();
+}
+
 // Health check
 app.get("/", (req, res) => res.json({ ok: true }));
 
+// Optional debug: see recent payment ids (remove later)
+app.get("/debug/payments", (req, res) => {
+  const list = [];
+  for (const [payment_id, p] of payments.entries()) {
+    list.push({ payment_id, ...p });
+  }
+  res.json({ ok: true, count: list.length, payments: list.slice(-50) });
+});
+
 // ====== NOWPayments Webhook ======
-// Set your NOWPayments IPN/Webhook URL to:
-// https://YOUR-RAILWAY-URL/webhook/nowpayments
+// Set NOWPayments IPN/Webhook URL to:
+// https://YOUR-RAILWAY-DOMAIN/webhook/nowpayments
 app.post("/webhook/nowpayments", (req, res) => {
-  // NOTE: For MVP we don't verify signature. We'll add later if you want.
-  const body = req.body;
+  const body = req.body || {};
 
-  const payment_id = String(body.payment_id ?? body.id ?? "");
-  const payment_status = String(body.payment_status ?? body.status ?? "").toLowerCase();
-  const email = String(body.email ?? "");
+  // Log the webhook so you can confirm it is hitting Railway
+  console.log("NOWPAYMENTS WEBHOOK HIT:", JSON.stringify(body));
 
-  if (!payment_id) return res.status(400).json({ ok: false, error: "Missing payment_id" });
+  // Try multiple possible fields (NOWPayments can vary by endpoint/version)
+  const payment_id = String(body.payment_id ?? body.id ?? body.paymentId ?? "").trim();
+  const payment_status = normalizeStatus(body.payment_status ?? body.status ?? body.paymentStatus);
+  const email = String(body.email ?? body.buyer_email ?? "").trim();
 
-  // Save/update payment
-  let p = payments.get(payment_id) || { status: "unknown", email, token: null, expiresAt: null };
-  p.status = payment_status;
+  if (!payment_id) {
+    return res.status(400).json({ ok: false, error: "Missing payment_id" });
+  }
+
+  // Treat both confirmed + finished as paid (NOWPayments often uses "finished")
+  const paid = payment_status === "confirmed" || payment_status === "finished";
+
+  // Upsert payment record
+  const existing = payments.get(payment_id);
+  const p = existing ?? {
+    status: "unknown",
+    token: null,
+    expiresAt: null,
+    email: email || null,
+    updatedAt: null
+  };
+
+  p.status = payment_status || p.status;
   if (email) p.email = email;
+  p.updatedAt = new Date().toISOString();
 
-  // If confirmed, generate a token if not already
-  if (payment_status === "confirmed" && !p.token) {
+  // Generate token only once, when payment is paid
+  if (paid && !p.token) {
     const token = makeToken();
     const expiresAt = addDays(new Date(), 30).toISOString();
 
     p.token = token;
     p.expiresAt = expiresAt;
 
-    tokens.set(token, { expiresAt, tiktokUsername: null, payment_id });
+    tokens.set(token, {
+      expiresAt,
+      tiktokUsername: null,
+      payment_id,
+      createdAt: new Date().toISOString()
+    });
+
+    console.log("TOKEN ISSUED:", { payment_id, token, expiresAt });
   }
 
   payments.set(payment_id, p);
   return res.json({ ok: true });
 });
 
-// ====== User checks their payment_id to receive token (optional) ======
+// ====== Claim page uses this: get token by payment_id ======
 app.get("/token-by-payment/:paymentId", (req, res) => {
-  const paymentId = String(req.params.paymentId);
+  const paymentId = String(req.params.paymentId ?? "").trim();
+  if (!paymentId) return res.status(400).json({ ok: false, error: "Missing paymentId" });
+
   const p = payments.get(paymentId);
   if (!p) return res.status(404).json({ ok: false, error: "Payment not found" });
 
-  if (p.status !== "confirmed") {
+  const status = normalizeStatus(p.status);
+  const paid = status === "confirmed" || status === "finished";
+
+  if (!paid) {
     return res.json({ ok: false, status: p.status });
+  }
+
+  // If for any reason token isn't there yet, say so (shouldn’t happen, but safer)
+  if (!p.token) {
+    return res.json({ ok: false, status: p.status, error: "Paid but token not generated yet" });
   }
 
   return res.json({ ok: true, token: p.token, expiresAt: p.expiresAt });
@@ -79,8 +129,8 @@ app.get("/token-by-payment/:paymentId", (req, res) => {
 
 // ====== Game activates token with TikTok username ======
 app.post("/activate", (req, res) => {
-  const token = String(req.body.token ?? "").trim().toUpperCase();
-  const tiktokUsername = String(req.body.tiktokUsername ?? "").trim();
+  const token = String(req.body?.token ?? "").trim().toUpperCase();
+  const tiktokUsername = String(req.body?.tiktokUsername ?? "").trim();
 
   if (!token || !tiktokUsername) {
     return res.status(400).json({ ok: false, error: "token and tiktokUsername are required" });
@@ -93,7 +143,7 @@ app.post("/activate", (req, res) => {
   const exp = new Date(t.expiresAt);
   if (now > exp) return res.json({ ok: false, error: "Expired", expiresAt: t.expiresAt });
 
-  // Bind token to username (first activation). If already bound, must match.
+  // Bind token to username on first activation; thereafter must match
   if (t.tiktokUsername && t.tiktokUsername.toLowerCase() !== tiktokUsername.toLowerCase()) {
     return res.status(403).json({ ok: false, error: "Token already bound to another username" });
   }
@@ -106,7 +156,7 @@ app.post("/activate", (req, res) => {
 
 // ====== Game checks token validity ======
 app.post("/check", (req, res) => {
-  const token = String(req.body.token ?? "").trim().toUpperCase();
+  const token = String(req.body?.token ?? "").trim().toUpperCase();
   if (!token) return res.status(400).json({ ok: false, error: "token is required" });
 
   const t = tokens.get(token);
